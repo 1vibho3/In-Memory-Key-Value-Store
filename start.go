@@ -3,8 +3,16 @@ package main
 import (
 	"fmt"
 	"sync"
-	"time"
+	"net/http"
+	"encoding/json"
 )
+
+var instance = NewStore()
+
+type KeyValue struct {
+	Key string `json:"key"`
+	Value string `json:"value"`
+}
 
 type Store struct {
 	store map[string]string
@@ -29,59 +37,46 @@ func (st *Store) getStore(key string) string{
 	return st.store[key]
 }
 
+func handleSet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var kv KeyValue
+	err := json.NewDecoder(r.Body).Decode(&kv)
+	if err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	instance.setStore(kv.Key, kv.Value)
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintln(w, "Value set successfully")
+}
+
+func handleGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Only GET allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	key := r.URL.Query().Get("key")
+	if key == "" {
+		http.Error(w, "Missing key parameter", http.StatusBadRequest)
+		return
+	}
+
+	val := instance.getStore(key)
+	json.NewEncoder(w).Encode(map[string]string{"value": val})
+}
+
+
+
 func main() {
-	var wg sync.WaitGroup
-	wg.Add(6)
 
-	instance := NewStore()
-
-	go func() {
-		defer wg.Done()
-		time.Sleep(100 * time.Millisecond)
-		instance.setStore("apple", "red")
-		fmt.Println("Wrote: red")
-	}()
-
-	go func() {
-		defer wg.Done()
-		time.Sleep(200 * time.Millisecond)
-		fmt.Println(instance.getStore("apple"))
-	}()
-
-	go func() {
-		defer wg.Done()
-		time.Sleep(300 * time.Millisecond)
-		instance.setStore("apple", "dark red")
-		fmt.Println("Wrote: dark red")
-	}()
-
-	go func() {
-		defer wg.Done()
-		time.Sleep(400 * time.Millisecond)
-		instance.setStore("mango", "yellow")
-		fmt.Println("Wrote: Yellow")
-	}()
-
-	go func() {
-		defer wg.Done()
-		time.Sleep(500 * time.Millisecond)
-		fmt.Println(instance.getStore("mango"))
-	}()
-
-	go func() {
-		defer wg.Done()
-		time.Sleep(600 * time.Millisecond)
-		fmt.Println(instance.getStore("apple"))
-	}()
-	
-	wg.Wait()
-
-	// color1 :=  instance.getStore("apple")
-	// color2 :=  instance.getStore("mango")
-	
-	
-	// fmt.Println(color1)
-	// fmt.Println(color2)
-
-	
+	http.HandleFunc("/set", handleSet)
+	http.HandleFunc("/get", handleGet)
+	http.ListenAndServe(":8080", nil)
 }
