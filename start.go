@@ -10,6 +10,7 @@ import (
 	"bytes"
 )
 
+// struct for KeyValue
 type KeyValue struct {
 	Key string `json:"key"`
 	Value string `json:"value"`
