@@ -37,7 +37,7 @@ type RaftNode struct {
 	voteCount int
 }
 
-// 2. Define RPC messages
+// Define RPC messages
 // RequestVoteArgs:
 // term, candidateId, lastLogIndex, lastLogTerm
 
@@ -48,12 +48,26 @@ type RequestVoteArgs struct {
 	// lastLogTerm int
 }
 
-// RequestVoteReply:
+// RequestVoteReply
 // term, voteGranted
 
-typeRequestVoteReply struct {
+type RequestVoteReply struct {
 	Term int
 	VoteGranted bool
+}
+
+// AppendEntriesArgs
+
+type AppendEntriesArgs  struct {
+	Term int
+	LeaderId string
+}
+
+// AppnedEntiresReply
+
+type AppendEntriesReply struct {
+	Term int
+	Success bool
 }
 
 //Constructor for new raft node
@@ -86,6 +100,34 @@ func (rn *RaftNode) startElectionTimer() {
 	}	
 }
 
+//reset election timer
+func (rn *RaftNode) resetElectionTimer() {
+	if rn.electionTimer != nil {
+		rn.electionTimer.Stop()
+	}
+
+	timeout := time.Duration(150+rand.Intn(150))*time.Millisecond
+	rn.electionTimer = time.NewTimer(timeout)
+
+	go func() {
+		<-rn.electionTimer.C
+		rn.startElectionTimer()
+	}()
+}
+
+func (rn *RaftNode) startHeartBeat(){
+	ticker := time.NewTicker(100 * time.Millisecond)
+	go func() {
+		for rn.role == Leader {
+			for _, peer := range rn.peers {
+				go rn.sendHeartBeat(peer)
+			}
+			<-ticker.C
+		}
+		ticker.Stop()
+	}()
+}
+
 //Implement handleRequestVote
 // Parse incoming RequestVoteArgs (from r.Body)
 // Compare incoming term to local currentTerm:
@@ -109,8 +151,8 @@ func (rn *RaftNode) handleRequestVote(w http.ResponseWriter, r *http.Request) {
 	defer rn.mu.Unlock()
 
 	//if my term is stale, update term, become follower and reset votedFor
-	if args.term > rn.currentTerm {
-		rn.currentTerm = args.term
+	if args.Term > rn.currentTerm {
+		rn.currentTerm = args.Term
 		rn.role = Follower
 		rn.votedFor = ""
 	}
@@ -135,7 +177,38 @@ func (rn *RaftNode) handleRequestVote(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(reply)
 }
 
-func (rn *RaftNode) RequestVoteRPC(peer string){
+//append entries handler
+func (rn *RaftNode) handleAppendEntries(w http.ResponseWriter, r *http.Request){
+	
+	var args AppendEntriesArgs
+
+	err := json.NewDecoder(r.Body).Decode(&args)
+	if err != nil {
+		http.Error(w, "Invalid json", http.StatusBadRequest)
+	}
+
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	
+	if args.Term > rn.currentTerm {
+		rn.currentTerm = args.Term
+		rn.role = Follower
+		rn.resetElectionTimer()
+	}
+
+	reply := AppendEntriesReply {
+		Term: rn.currentTerm,
+		Success: true,
+	}
+
+	json.NewEncoder(w).Encode(reply)
+}
+
+
+//Request Vote RPC
+
+func (rn *RaftNode) requestVoteRPC(peer string){
 	
 	//prpeare args for sending
 	args := RequestVoteArgs {
@@ -168,9 +241,11 @@ func (rn *RaftNode) RequestVoteRPC(peer string){
 		return
 	}
 
+	// Lock the node
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
 
+	//become leader
 	if reply.Term > rn.currentTerm {
 		rn.currentTerm = reply.Term
 		rn.role = Follower
@@ -178,18 +253,59 @@ func (rn *RaftNode) RequestVoteRPC(peer string){
 		return
 	}
 
-	if reply.voteGranted {
+	if reply.VoteGranted {
 		rn.voteCount++
-		if rn.voteCount > len(rn.peers) + 1 / 2 {
+		if rn.voteCount > (len(rn.peers) + 1) / 2 {
 			fmt.Println(rn.id, "won the electino and became Leader")
 			rn.role = Leader
 			if(rn.electionTimer != nil){
 				rn.electionTimer.Stop()
 			}
+
+			rn.startHeartBeat()
 		}
 	}
 
 	
+}
+
+func (rn *RaftNode) sendHeartBeat(peer string){
+	args := AppendEntriesArgs {
+		Term: rn.currentTerm,
+		LeaderId: rn.id,
+	}
+
+	body, err := json.Marshal(args)
+	if (err != nil) {
+		fmt.Println("Failed to encode heartbeat", err)
+		return
+	}
+
+	resp, err := http.Post(peer+"/append-entries", "application/json", bytes.NewBuffer(body))
+	if(err != nil){
+		fmt.Println("Failed to send heartbeat to", peer, ":", err)
+		return
+	}
+
+	defer resp.Body.Close()
+
+	var reply AppendEntriesReply
+
+	err = json.NewDecoder(resp.Body).Decode(&reply)
+	if err != nil {
+		fmt.Println("Failed to decode heartbeat reply from", peer, ":", err)
+		return
+	}
+
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	if reply.Term > rn.currentTerm{
+		rn.currentTerm = reply.Term
+		rn.role = Follower
+		rn.votedFor = ""
+		rn.resetElectionTimer()
+	}
 }
 
 func main() {
@@ -197,6 +313,14 @@ func main() {
 	http.HandleFunc("/request-vote", func(w , r) {
 		node.handleRequestVote(w, r)
 	})
+
+	http.HandleFunc("/append-entries", func(w, r) {
+		node.handleAppendEntries(w,r)
+	})
+
+	fmt.Println("Starting Raft node at :8080")
+	http.ListenAndServe(":8080", nil)
+
 }
 
 
